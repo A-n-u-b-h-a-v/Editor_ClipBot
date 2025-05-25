@@ -16,16 +16,16 @@ const googleapis_1 = require("googleapis");
 const axios_1 = __importDefault(require("axios"));
 const dotenv_1 = __importDefault(require("dotenv"));
 dotenv_1.default.config();
-const youtube = googleapis_1.google.youtube({
-    version: "v3",
-    auth: process.env.YOUTUBE_API_KEY,
-});
+const API_KEYS = [process.env.YOUTUBE_API_KEY_1, process.env.YOUTUBE_API_KEY_2].filter(Boolean);
+if (API_KEYS.length === 0)
+    throw new Error("No YouTube API keys found!");
 const CHANNEL_ID = process.env.CHANNEL_ID;
 const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 const POLL_INTERVAL = 15000;
 const CLIP_DURATION = 30;
 const CLIP_COOLDOWN = 30 * 1000;
-let liveChatId = null;
+let keyIndex = 0;
+let liveChatId = "";
 let streamStartTime = null;
 let lastMessageTimestamp = "";
 let lastClipTimestamp = 0;
@@ -33,6 +33,37 @@ let currentVideoId = null;
 let streamTitle = null;
 let nextPageToken = undefined;
 let pollingInterval = POLL_INTERVAL;
+function getYouTubeClient() {
+    return googleapis_1.google.youtube({
+        version: "v3",
+        auth: API_KEYS[keyIndex],
+    });
+}
+function makeYouTubeRequest(fn) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a;
+        const maxRetries = API_KEYS.length;
+        let attempts = 0;
+        while (attempts < maxRetries) {
+            const youtube = getYouTubeClient();
+            try {
+                return yield fn(youtube);
+            }
+            catch (error) {
+                if (error.code === 403 && ((_a = error.errors) === null || _a === void 0 ? void 0 : _a.some((e) => e.reason === "quotaExceeded"))) {
+                    console.warn(`⚠️ Quota exceeded for API key ${keyIndex + 1}, switching to next...`);
+                    keyIndex = (keyIndex + 1) % API_KEYS.length;
+                    attempts++;
+                    continue;
+                }
+                else {
+                    throw error;
+                }
+            }
+        }
+        throw new Error("❌ All API keys have exceeded their quota.");
+    });
+}
 function formatTime(seconds) {
     const h = String(Math.floor(seconds / 3600)).padStart(2, "0");
     const m = String(Math.floor((seconds % 3600) / 60)).padStart(2, "0");
@@ -42,23 +73,23 @@ function formatTime(seconds) {
 function getLiveBroadcast() {
     return __awaiter(this, void 0, void 0, function* () {
         var _a, _b, _c, _d, _e;
-        const res = yield youtube.search.list({
+        const res = yield makeYouTubeRequest(youtube => youtube.search.list({
             part: ["snippet"],
             channelId: CHANNEL_ID,
             eventType: "live",
             type: ["video"],
             maxResults: 1,
-        });
+        }));
         const live = (_a = res.data.items) === null || _a === void 0 ? void 0 : _a[0];
         if (!live)
             throw new Error("❌ No live broadcast found.");
         const videoId = (_b = live.id) === null || _b === void 0 ? void 0 : _b.videoId;
         currentVideoId = videoId;
         streamTitle = ((_c = live.snippet) === null || _c === void 0 ? void 0 : _c.title) || "Untitled Stream";
-        const videoRes = yield youtube.videos.list({
+        const videoRes = yield makeYouTubeRequest(youtube => youtube.videos.list({
             part: ["liveStreamingDetails"],
             id: [videoId],
-        });
+        }));
         const details = (_e = (_d = videoRes.data.items) === null || _d === void 0 ? void 0 : _d[0]) === null || _e === void 0 ? void 0 : _e.liveStreamingDetails;
         if (!(details === null || details === void 0 ? void 0 : details.activeLiveChatId) || !details.actualStartTime) {
             throw new Error("❌ Missing live stream details.");
@@ -76,11 +107,11 @@ function pollChat() {
         if (!liveChatId || !streamStartTime || !currentVideoId)
             return;
         try {
-            const res = yield youtube.liveChatMessages.list({
+            const res = yield makeYouTubeRequest(youtube => youtube.liveChatMessages.list({
                 liveChatId,
                 part: ["snippet", "authorDetails"],
                 pageToken: nextPageToken,
-            });
+            }));
             nextPageToken = res.data.nextPageToken;
             pollingInterval = res.data.pollingIntervalMillis || POLL_INTERVAL;
             const messages = res.data.items || [];
@@ -104,7 +135,6 @@ function pollChat() {
                     const formattedStart = formatTime(start);
                     const formattedEnd = formatTime(end);
                     const videoLink = `https://youtu.be/${currentVideoId}?t=${start}`;
-                    // Parse optional custom title
                     const parts = text.trim().split(" ");
                     const customTitle = parts.slice(1).join(" ");
                     const titleText = customTitle || "Untitled Clip";
